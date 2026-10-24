@@ -88,7 +88,7 @@ avs scan --scope iso --format sarif --output iso-report.sarif
 NO_COLOR=1 avs              # disable colored output
 ```
 
-Interactive mode defaults to **ISO source inputs** for an Abora checkout containing `nix/profiles/live.nix`, and **repository** for other projects. Noninteractive `avs scan` defaults to repository scope unless `--scope iso` is provided.
+Interactive mode defaults to **ISO source inputs** for an Abora checkout containing `nix/profiles/live.nix`, and **repository** for other projects. Noninteractive `avs scan` now automatically selects ISO source-input scope for recognized Abora checkouts; other projects use repository scope. Use `--scope repository` to override.
 
 **ISO scope is an approximation, not proof of ISO contents.** It scans literal relative source references in `nix/profiles/live.nix` and `nix/modules/installed-base.nix`, plus Nix build configuration files. It does not evaluate dynamic Nix expressions or the final system closure. Build and inspect the real ISO to verify shipping files. Paths included through entire directories (for example `docs/`) may contain documentation examples.
 
