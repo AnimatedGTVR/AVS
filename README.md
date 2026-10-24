@@ -35,3 +35,29 @@ Do not treat heuristic matches as verified vulnerabilities. Report suspected vul
 ## License
 
 GPL-3.0-only.
+
+
+## Install the `avs` command
+
+From the cloned AVS repository, run:
+
+```bash
+cargo install --path . --force
+```
+
+Make sure `~/.cargo/bin` is in your `PATH` (restart your shell if necessary). Then launch the interactive scanner with:
+
+```bash
+avs
+```
+
+Or run directly:
+
+```bash
+avs scan "$HOME/Work/Abora-OS" --cve --output avs-report.json
+avs report avs-report.json
+```
+
+Running `avs` without arguments now prompts for a local folder and whether to query OSV for Rust crate vulnerabilities. It does not modify scanned source files. Reports may include sensitive file paths, so review before sharing.
+
+See [AVS 0.2 documentation](README-AVS-0.2.md) for supported AVS finding codes and current Nix/CVE limitations.
