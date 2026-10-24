@@ -84,6 +84,10 @@ fn scan(root:&Path, hidden:bool, cve:bool) -> Report {
         if !entry.file_type().is_file() { continue; }
         let path=entry.path();
         if path.file_name().and_then(|s|s.to_str())==Some("Cargo.lock") { locks.push(path.to_path_buf()); }
+        // Only inspect likely textual sources; avoid treating screenshots and wallpapers as scan failures.
+        if let Some(ext)=path.extension().and_then(|e|e.to_str()) {
+            if ["png","jpg","jpeg","webp","gif","ico","svgz","pdf","zip","tar","gz","xz","zst","mp3","ogg","mp4","woff","woff2","ttf","otf","so","a","o","bin","iso"].contains(&ext.to_ascii_lowercase().as_str()) {continue;}
+        }
         let metadata=match entry.metadata(){Ok(m)=>m,Err(e)=>{report.warnings.push(format!("{}: {e}",path.display()));continue}};
         if metadata.len()>2_000_000 {report.warnings.push(format!("Skipped oversized file: {}",path.display()));continue;}
         let bytes=match fs::read(path){Ok(v)=>v,Err(e)=>{report.warnings.push(format!("{}: {e}",path.display()));continue}};
@@ -92,11 +96,14 @@ fn scan(root:&Path, hidden:bool, cve:bool) -> Report {
         report.files_scanned+=1;
         let nix=path.extension().and_then(|x|x.to_str())==Some("nix");
         for (i,line) in content.lines().enumerate() {
+            let trimmed = line.trim_start();
+            let comment = trimmed.starts_with("#") || trimmed.starts_with("//");
             // Ignore scanner rule definitions to avoid AVS flagging its own patterns.
             if path.file_name().and_then(|x| x.to_str()) == Some("main.rs") && line.contains("(\"AVS-") { continue; }
             for (rule,re) in rules.iter().zip(compiled.iter()) {
                 if rule.0.starts_with("AVS-NIX") && !nix {continue;}
                 if rule.0.starts_with("AVS-QUAL") && !["rs","sh","bash","nix","py","c","cpp","h","cs","go","js","ts"].contains(&path.extension().and_then(|x|x.to_str()).unwrap_or("")) {continue;}
+                if comment && (rule.0.starts_with("AVS-SEC") || rule.0.starts_with("AVS-QUAL")) {continue;}
                 if re.is_match(line) {
                     report.findings.push(finding(rule.0,rule.1,rule.2,path,i+1,rule.4,rule.5));
                 }
