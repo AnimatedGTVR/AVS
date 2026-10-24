@@ -61,3 +61,18 @@ avs report avs-report.json
 Running `avs` without arguments now prompts for a local folder and whether to query OSV for Rust crate vulnerabilities. It does not modify scanned source files. Reports may include sensitive file paths, so review before sharing.
 
 See [AVS 0.2 documentation](README-AVS-0.2.md) for supported AVS finding codes and current Nix/CVE limitations.
+
+## Remember your Abora OS folder
+
+Run this once:
+
+```bash
+avs config set-project "$HOME/Work/Abora-OS"
+```
+
+AVS stores the folder in `$XDG_CONFIG_HOME/avs/config.json`, or `~/.config/avs/config.json` if `XDG_CONFIG_HOME` is unset. Subsequent `avs` runs use the saved folder automatically, and `avs scan` uses it when no path is supplied. Explicit paths with `avs scan /another/folder` do not overwrite the saved default.
+
+```bash
+avs config show
+avs config clear
+```
