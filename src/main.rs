@@ -21,8 +21,8 @@ enum Command {
     Scan {
         path: Option<PathBuf>,
         /// Repository-wide scan or conservative Abora ISO build-input scan
-        #[arg(long, value_enum, default_value_t=Scope::Repository)]
-        scope: Scope,
+        #[arg(long, value_enum)]
+        scope: Option<Scope>,
         #[arg(long, value_enum, default_value_t=Format::Text)]
         format: Format,
         #[arg(long, default_value="avs-report.json")]
@@ -126,6 +126,29 @@ struct Report {
     findings: Vec<Finding>,
 }
 fn default_scope() -> String { "repository".into() }
+
+fn choose_scope(root: &Path, requested: Option<Scope>) -> Scope {
+    requested.unwrap_or_else(|| {
+        if root.join("nix/profiles/live.nix").is_file() { Scope::Iso }
+        else { Scope::Repository }
+    })
+}
+
+#[cfg(test)]
+mod scope_default_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_scope_wins() {
+        assert_eq!(choose_scope(Path::new("/missing"), Some(Scope::Repository)), Scope::Repository);
+        assert_eq!(choose_scope(Path::new("/missing"), Some(Scope::Iso)), Scope::Iso);
+    }
+    #[test]
+    fn ordinary_project_defaults_to_repository() {
+        assert_eq!(choose_scope(Path::new("/not-an-abora-checkout"), None), Scope::Repository);
+    }
+}
+
 fn finding(code:&str, severity:&str, category:&str, file:&Path, line:usize, message:&str, recommendation:&str) -> Finding {
     Finding { code:code.into(), severity:severity.into(), category:category.into(), file:file.display().to_string(), line, message:message.into(), recommendation:recommendation.into(), cve:None }
 }
@@ -338,6 +361,7 @@ fn main()->ExitCode {
         Some(Command::Scan{path,format,output,cve,hidden,scope})=>{
             let path = path.map(expand_path).or_else(load_project).unwrap_or_else(||PathBuf::from("."));
             if !path.exists(){eprintln!("Target not found: {}",path.display());return ExitCode::from(2);}
+            let scope=choose_scope(&path,scope);
             let report=scan(&path,hidden,cve,scope);
             let rendered=match format {
                 Format::Text=>{
