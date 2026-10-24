@@ -1,8 +1,11 @@
+mod scope;
+mod ui;
 use clap::{Parser, Subcommand, ValueEnum};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, fs, io::{self, Write}, path::{Path, PathBuf}, process::ExitCode};
 use walkdir::WalkDir;
+use scope::{Scope, IsoInputs};
 
 const LOGO: &str = include_str!("../assets/abora-fastfetch.txt");
 
@@ -17,6 +20,9 @@ enum Command {
     /// Scan a local project recursively (read-only)
     Scan {
         path: Option<PathBuf>,
+        /// Repository-wide scan or conservative Abora ISO build-input scan
+        #[arg(long, value_enum, default_value_t=Scope::Repository)]
+        scope: Scope,
         #[arg(long, value_enum, default_value_t=Format::Text)]
         format: Format,
         #[arg(long, default_value="avs-report.json")]
@@ -113,10 +119,13 @@ struct Report {
     scanner: String,
     version: String,
     target: String,
+    #[serde(default = "default_scope")]
+    scope: String,
     files_scanned: usize,
     warnings: Vec<String>,
     findings: Vec<Finding>,
 }
+fn default_scope() -> String { "repository".into() }
 fn finding(code:&str, severity:&str, category:&str, file:&Path, line:usize, message:&str, recommendation:&str) -> Finding {
     Finding { code:code.into(), severity:severity.into(), category:category.into(), file:file.display().to_string(), line, message:message.into(), recommendation:recommendation.into(), cve:None }
 }
@@ -143,7 +152,7 @@ mod classification_tests {
     }
 }
 
-fn scan(root:&Path, hidden:bool, cve:bool) -> Report {
+fn scan(root:&Path, hidden:bool, cve:bool, scope:Scope) -> Report {
     let rules = [
         ("AVS-SEC-001","HIGH","Security",r"\bcurl\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b","Remote download piped into shell","Download, inspect, and verify checksums before executing"),
         ("AVS-SEC-002","HIGH","Security",r"\bwget\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b","Remote download piped into shell","Avoid piping untrusted downloads into shell"),
@@ -156,11 +165,21 @@ fn scan(root:&Path, hidden:bool, cve:bool) -> Report {
         ("AVS-QUAL-001","LOW","Quality",r"\b(?:TODO|FIXME|HACK)\b","Outstanding maintenance marker","Review and track in issue backlog"),
     ];
     let compiled:Vec<Regex>=rules.iter().map(|r| Regex::new(r.3).unwrap()).collect();
-    let mut report=Report { scanner:"AVS".into(), version:env!("CARGO_PKG_VERSION").into(), target:root.display().to_string(), files_scanned:0, warnings:vec![], findings:vec![] };
+    let mut report=Report { scanner:"AVS".into(), version:env!("CARGO_PKG_VERSION").into(), target:root.display().to_string(), scope:format!("{scope:?}").to_lowercase(), files_scanned:0, warnings:vec![], findings:vec![] };
+    let iso_inputs = if scope==Scope::Iso {
+        let root_abs=match fs::canonicalize(root) {
+            Ok(root_abs)=>root_abs,
+            Err(e)=>{report.warnings.push(format!("AVS-SCOPE-004: Could not resolve target: {e}"));return report}
+        };
+        let inputs=IsoInputs::collect(&root_abs);
+        report.warnings.extend(inputs.warnings.iter().cloned());
+        Some(inputs)
+    } else {None};
     let walker=WalkDir::new(root).follow_links(false).into_iter().filter_entry(|e| {
         let name=e.file_name().to_string_lossy();
         if e.depth()==0 { return true; }
-        if [".git","target","node_modules",".direnv",".venv","vendor","result"].contains(&name.as_ref()) { return false; }
+        if [".git","target","node_modules",".direnv",".venv","result"].contains(&name.as_ref()) { return false; }
+        if scope == Scope::Repository && name == "vendor" {return false;}
         hidden || !name.starts_with('.')
     });
     let mut locks=vec![];
@@ -168,6 +187,10 @@ fn scan(root:&Path, hidden:bool, cve:bool) -> Report {
         let entry=match entry { Ok(e)=>e, Err(e)=>{report.warnings.push(e.to_string());continue} };
         if !entry.file_type().is_file() { continue; }
         let path=entry.path();
+        if let Some(inputs)=&iso_inputs {
+            // Normalize and test exact Nix source roots, never broad repository paths.
+            if !inputs.includes(&path.canonicalize().unwrap_or_else(|_|path.to_path_buf())) {continue;}
+        }
         if path.file_name().and_then(|s|s.to_str())==Some("Cargo.lock") { locks.push(path.to_path_buf()); }
         // Only inspect likely textual sources; avoid treating screenshots and wallpapers as scan failures.
         if let Some(ext)=path.extension().and_then(|e|e.to_str()) {
@@ -261,7 +284,7 @@ fn main()->ExitCode {
     let cli=Cli::parse();
     match cli.command {
         None => {
-            println!("{LOGO}\n  AVS  |  Abora Vulnerability Scanner\n  v{}  •  Read-only security & quality analysis\n",env!("CARGO_PKG_VERSION"));
+            ui::welcome();
             let path = if let Some(saved) = load_project() {
                 if saved.is_dir() {
                     println!("  Saved project: {}", saved.display());
@@ -286,32 +309,42 @@ fn main()->ExitCode {
                     Err(e)=>{eprintln!("{e}");return ExitCode::from(2);}
                 }
             };
+            let iso_available=path.join("nix/profiles/live.nix").is_file();
+            let scan_scope=if iso_available {
+                print!("  Scope [I]SO inputs / [R]epository (default: ISO): ");
+                if io::stdout().flush().is_err(){return ExitCode::from(2);}
+                let mut choice=String::new();
+                if io::stdin().read_line(&mut choice).is_err(){return ExitCode::from(2);}
+                if choice.trim().eq_ignore_ascii_case("r") {Scope::Repository} else {Scope::Iso}
+            } else {Scope::Repository};
             print!("  Check crates.io CVEs using OSV? [y/N] : ");
             if io::stdout().flush().is_err(){return ExitCode::from(2);}
             let mut answer=String::new();
             if io::stdin().read_line(&mut answer).is_err(){return ExitCode::from(2);}
-            let report=scan(&path,false,matches!(answer.trim().to_lowercase().as_str(),"y"|"yes"));
-            println!("\n  Scanned {} files • {} findings • {} warnings",report.files_scanned,report.findings.len(),report.warnings.len());
-            for f in &report.findings {println!("  {} [{}] {}:{} — {}",f.code,f.severity,f.file,f.line,f.message);}
-            for w in &report.warnings {eprintln!("  Warning: {w}");}
+            ui::heading(if scan_scope==Scope::Iso {"ISO source inputs (approximate)"} else {"Repository"},&path.display().to_string());
+            let report=scan(&path,false,matches!(answer.trim().to_lowercase().as_str(),"y"|"yes"),scan_scope);
+            ui::summary(&report);
+            ui::findings(&report.findings);
+            ui::warnings(&report.warnings);
             match serde_json::to_string_pretty(&report) {
                 Ok(json)=>match fs::write("avs-report.json",json){
-                    Ok(())=>println!("\n  Report saved: avs-report.json"),
+                    Ok(())=>ui::saved("avs-report.json"),
                     Err(e)=>{eprintln!("Cannot save report: {e}");return ExitCode::from(2);}
                 },
                 Err(e)=>{eprintln!("Cannot serialize report: {e}");return ExitCode::from(2);}
             }
             ExitCode::SUCCESS
         },
-        Some(Command::Scan{path,format,output,cve,hidden})=>{
+        Some(Command::Scan{path,format,output,cve,hidden,scope})=>{
             let path = path.map(expand_path).or_else(load_project).unwrap_or_else(||PathBuf::from("."));
             if !path.exists(){eprintln!("Target not found: {}",path.display());return ExitCode::from(2);}
-            let report=scan(&path,hidden,cve);
+            let report=scan(&path,hidden,cve,scope);
             let rendered=match format {
                 Format::Text=>{
-                    eprintln!("AVS • scanned {} text files; {} findings; {} warnings",report.files_scanned,report.findings.len(),report.warnings.len());
-                    for f in &report.findings {println!("{} [{}] {}:{} — {}",f.code,f.severity,f.file,f.line,f.message);}
-                    for w in &report.warnings {eprintln!("Warning: {w}");}
+                    ui::heading(&report.scope,&report.target);
+                    ui::summary(&report);
+                    ui::findings(&report.findings);
+                    ui::warnings(&report.warnings);
                     serde_json::to_string_pretty(&report).unwrap()
                 },
                 Format::Json=>serde_json::to_string_pretty(&report).unwrap(),
@@ -319,7 +352,7 @@ fn main()->ExitCode {
             };
             if !matches!(format,Format::Text) {println!("{rendered}");}
             if let Err(e)=fs::write(&output,rendered){eprintln!("Could not save {}: {e}",output.display());return ExitCode::from(2);}
-            eprintln!("Report saved: {}",output.display());
+            if matches!(format,Format::Text) { ui::saved(&output.display().to_string()); } else {eprintln!("Report saved: {}",output.display());}
             ExitCode::SUCCESS
         },
         Some(Command::Config{action})=>match action {
@@ -347,7 +380,7 @@ fn main()->ExitCode {
         },
         Some(Command::Report{file})=>match fs::read_to_string(&file) {
             Ok(raw)=>match serde_json::from_str::<Report>(&raw){
-                Ok(r)=>{println!("AVS report: {} files, {} findings",r.files_scanned,r.findings.len());for f in r.findings{println!("{} [{}] {}:{} — {}",f.code,f.severity,f.file,f.line,f.message);}ExitCode::SUCCESS},
+                Ok(r)=>{ui::heading(&r.scope,&r.target);ui::summary(&r);ui::findings(&r.findings);ui::warnings(&r.warnings);ExitCode::SUCCESS},
                 Err(e)=>{eprintln!("Invalid AVS report: {e}");ExitCode::from(2)}
             },
             Err(e)=>{eprintln!("Cannot read report: {e}");ExitCode::from(2)}
