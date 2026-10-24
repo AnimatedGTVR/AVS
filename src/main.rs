@@ -120,6 +120,29 @@ struct Report {
 fn finding(code:&str, severity:&str, category:&str, file:&Path, line:usize, message:&str, recommendation:&str) -> Finding {
     Finding { code:code.into(), severity:severity.into(), category:category.into(), file:file.display().to_string(), line, message:message.into(), recommendation:recommendation.into(), cve:None }
 }
+fn context_for(path: &Path) -> &'static str {
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if ext == "md" || ext == "rst" || ext == "txt" { return "Documentation"; }
+    if name.contains(".test.") || name.ends_with("_test.py") || name.starts_with("test_")
+        || path.components().any(|c| matches!(c.as_os_str().to_str(), Some("tests" | "test" | "__tests__" | "fixtures"))) {
+        return "Test code";
+    }
+    "Production code"
+}
+
+#[cfg(test)]
+mod classification_tests {
+    use super::*;
+    #[test]
+    fn detects_test_and_documentation_paths() {
+        assert_eq!(context_for(Path::new("scripts/install/tests/setup.sh")), "Test code");
+        assert_eq!(context_for(Path::new("scripts/apps/foo.test.sh")), "Test code");
+        assert_eq!(context_for(Path::new("docs/wiki/Installation.md")), "Documentation");
+        assert_eq!(context_for(Path::new("scripts/install/setup.sh")), "Production code");
+    }
+}
+
 fn scan(root:&Path, hidden:bool, cve:bool) -> Report {
     let rules = [
         ("AVS-SEC-001","HIGH","Security",r"\bcurl\b[^\n|]*\|\s*(?:sudo\s+)?(?:ba)?sh\b","Remote download piped into shell","Download, inspect, and verify checksums before executing"),
@@ -167,7 +190,18 @@ fn scan(root:&Path, hidden:bool, cve:bool) -> Report {
                 if rule.0.starts_with("AVS-QUAL") && !["rs","sh","bash","nix","py","c","cpp","h","cs","go","js","ts"].contains(&path.extension().and_then(|x|x.to_str()).unwrap_or("")) {continue;}
                 if comment && (rule.0.starts_with("AVS-SEC") || rule.0.starts_with("AVS-QUAL")) {continue;}
                 if re.is_match(line) {
-                    report.findings.push(finding(rule.0,rule.1,rule.2,path,i+1,rule.4,rule.5));
+                    let context = context_for(path);
+                    let (severity, category) = if rule.0.starts_with("AVS-SEC") && context != "Production code" {
+                        ("INFO", context)
+                    } else {
+                        (rule.1, rule.2)
+                    };
+                    let recommendation = if context == "Production code" {
+                        rule.5.to_string()
+                    } else {
+                        format!("{}; review in context ({}; not automatically an exploitable finding)", rule.5, context)
+                    };
+                    report.findings.push(finding(rule.0,severity,category,path,i+1,rule.4,&recommendation));
                 }
             }
         }
