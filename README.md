@@ -1,6 +1,6 @@
 # AVS — Abora Vulnerability Scanner
 
-Early Rust CLI prototype for heuristic source scanning. Findings are **potential issues**, not confirmed vulnerabilities. No CVE matching is implemented yet.
+AVS v0.3.0-alpha is a read-only Rust security and quality scanner for Abora OS. Findings are **potential issues**, not confirmed vulnerabilities. Optional OSV queries check crates.io dependencies in Cargo.lock; Nix package CVE matching is not implemented yet.
 
 ## Build
 
@@ -76,3 +76,20 @@ AVS stores the folder in `$XDG_CONFIG_HOME/avs/config.json`, or `~/.config/avs/c
 avs config show
 avs config clear
 ```
+
+## AVS v0.3: color interface and scan scopes
+
+```bash
+avs                          # interactive: remembered project, scope selector, OSV prompt
+avs scan --scope iso         # analyze source inputs declared in Abora Nix configurations
+avs scan --scope repository  # scan the full repository (excluding vendor and build caches)
+avs scan --scope iso --cve   # also query OSV for crates.io packages in included Cargo.lock
+avs scan --scope iso --format sarif --output iso-report.sarif
+NO_COLOR=1 avs              # disable colored output
+```
+
+Interactive mode defaults to **ISO source inputs** for an Abora checkout containing `nix/profiles/live.nix`, and **repository** for other projects. Noninteractive `avs scan` defaults to repository scope unless `--scope iso` is provided.
+
+**ISO scope is an approximation, not proof of ISO contents.** It scans literal relative source references in `nix/profiles/live.nix` and `nix/modules/installed-base.nix`, plus Nix build configuration files. It does not evaluate dynamic Nix expressions or the final system closure. Build and inspect the real ISO to verify shipping files. Paths included through entire directories (for example `docs/`) may contain documentation examples.
+
+The terminal uses color only on an interactive TTY, respects `NO_COLOR`, and leaves JSON/SARIF machine output free of ANSI codes. Report JSON includes a `scope` field.
