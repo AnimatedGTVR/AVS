@@ -16,8 +16,7 @@ struct Cli {
 enum Command {
     /// Scan a local project recursively (read-only)
     Scan {
-        #[arg(default_value=".")]
-        path: PathBuf,
+        path: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t=Format::Text)]
         format: Format,
         #[arg(long, default_value="avs-report.json")]
@@ -29,9 +28,72 @@ enum Command {
         #[arg(long)]
         hidden: bool,
     },
+    /// Remember or display your default project folder
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
     /// Print a previously saved AVS JSON report
     Report { #[arg(default_value="avs-report.json")] file: PathBuf },
 }
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Set and save the project folder
+    SetProject { path: PathBuf },
+    /// Show the saved project folder
+    Show,
+    /// Forget the saved project folder
+    Clear,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AvsConfig {
+    project: PathBuf,
+}
+
+fn config_file() -> Result<PathBuf, String> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .ok_or_else(|| "Neither XDG_CONFIG_HOME nor HOME is set".to_string())?;
+    Ok(base.join("avs").join("config.json"))
+}
+
+fn load_project() -> Option<PathBuf> {
+    let file = config_file().ok()?;
+    let raw = fs::read_to_string(file).ok()?;
+    serde_json::from_str::<AvsConfig>(&raw).ok().map(|c| c.project)
+}
+
+fn expand_path(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    if raw == "~" {
+        return std::env::var_os("HOME").map(PathBuf::from).unwrap_or(path);
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    path
+}
+
+fn save_project(path: &Path) -> Result<PathBuf, String> {
+    let absolute = fs::canonicalize(expand_path(path.to_path_buf()))
+        .map_err(|e| format!("Cannot access project folder: {e}"))?;
+    if !absolute.is_dir() {
+        return Err(format!("Not a directory: {}", absolute.display()));
+    }
+    let config = config_file()?;
+    if let Some(parent) = config.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Cannot create config directory: {e}"))?;
+    }
+    let content = serde_json::to_vec_pretty(&AvsConfig { project: absolute.clone() })
+        .map_err(|e| format!("Cannot encode config: {e}"))?;
+    fs::write(&config, content).map_err(|e| format!("Cannot save config: {e}"))?;
+    Ok(absolute)
+}
+
 #[derive(Clone, Copy, ValueEnum)]
 enum Format { Text, Json, Sarif }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,18 +228,30 @@ fn main()->ExitCode {
     match cli.command {
         None => {
             println!("{LOGO}\n  AVS  |  Abora Vulnerability Scanner\n  v{}  •  Read-only security & quality analysis\n",env!("CARGO_PKG_VERSION"));
-            print!("  Project folder [.] : ");
-            if io::stdout().flush().is_err() { return ExitCode::from(2); }
-            let mut input=String::new();
-            if io::stdin().read_line(&mut input).is_err() {return ExitCode::from(2);}
-            let chosen=input.trim();
-            let path=if chosen.is_empty(){PathBuf::from(".")}else{
-                let expanded=if chosen=="~" {std::env::var("HOME").unwrap_or_else(|_|chosen.to_string())}
-                else if let Some(rest)=chosen.strip_prefix("~/") {format!("{}/{}",std::env::var("HOME").unwrap_or_else(|_|"~".into()),rest)}
-                else {chosen.to_string()};
-                PathBuf::from(expanded)
+            let path = if let Some(saved) = load_project() {
+                if saved.is_dir() {
+                    println!("  Saved project: {}", saved.display());
+                    println!("  Change with: avs config set-project /path/to/project");
+                    saved
+                } else {
+                    eprintln!("Saved project is unavailable: {}", saved.display());
+                    eprintln!("Run: avs config set-project /path/to/project");
+                    return ExitCode::from(2);
+                }
+            } else {
+                print!("  Project folder: ");
+                if io::stdout().flush().is_err() { return ExitCode::from(2); }
+                let mut input=String::new();
+                if io::stdin().read_line(&mut input).is_err(){return ExitCode::from(2);}
+                if input.trim().is_empty(){
+                    eprintln!("Enter a project path, e.g. ~/Work/Abora-OS");
+                    return ExitCode::from(2);
+                }
+                match save_project(&PathBuf::from(input.trim())) {
+                    Ok(saved)=>{println!("  Saved project: {}",saved.display());saved},
+                    Err(e)=>{eprintln!("{e}");return ExitCode::from(2);}
+                }
             };
-            if !path.exists(){eprintln!("Target not found: {}",path.display());return ExitCode::from(2);}
             print!("  Check crates.io CVEs using OSV? [y/N] : ");
             if io::stdout().flush().is_err(){return ExitCode::from(2);}
             let mut answer=String::new();
@@ -196,6 +270,7 @@ fn main()->ExitCode {
             ExitCode::SUCCESS
         },
         Some(Command::Scan{path,format,output,cve,hidden})=>{
+            let path = path.map(expand_path).or_else(load_project).unwrap_or_else(||PathBuf::from("."));
             if !path.exists(){eprintln!("Target not found: {}",path.display());return ExitCode::from(2);}
             let report=scan(&path,hidden,cve);
             let rendered=match format {
@@ -212,6 +287,29 @@ fn main()->ExitCode {
             if let Err(e)=fs::write(&output,rendered){eprintln!("Could not save {}: {e}",output.display());return ExitCode::from(2);}
             eprintln!("Report saved: {}",output.display());
             ExitCode::SUCCESS
+        },
+        Some(Command::Config{action})=>match action {
+            ConfigAction::SetProject{path}=>match save_project(&path) {
+                Ok(saved)=>{println!("Saved AVS project: {}",saved.display());ExitCode::SUCCESS},
+                Err(e)=>{eprintln!("{e}");ExitCode::from(2)}
+            },
+            ConfigAction::Show=>{
+                match load_project(){
+                    Some(path)=>println!("Saved AVS project: {}",path.display()),
+                    None=>println!("No project saved. Run: avs config set-project ~/Work/Abora-OS"),
+                }
+                ExitCode::SUCCESS
+            },
+            ConfigAction::Clear=>{
+                match config_file() {
+                    Ok(path)=>match fs::remove_file(path){
+                        Ok(())=>{println!("Saved project cleared.");ExitCode::SUCCESS},
+                        Err(e) if e.kind()==io::ErrorKind::NotFound=>{println!("No saved project.");ExitCode::SUCCESS},
+                        Err(e)=>{eprintln!("Unable to clear config: {e}");ExitCode::from(2)}
+                    },
+                    Err(e)=>{eprintln!("{e}");ExitCode::from(2)}
+                }
+            }
         },
         Some(Command::Report{file})=>match fs::read_to_string(&file) {
             Ok(raw)=>match serde_json::from_str::<Report>(&raw){
