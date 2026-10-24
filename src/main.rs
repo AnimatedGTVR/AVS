@@ -92,8 +92,11 @@ fn scan(root:&Path, hidden:bool, cve:bool) -> Report {
         report.files_scanned+=1;
         let nix=path.extension().and_then(|x|x.to_str())==Some("nix");
         for (i,line) in content.lines().enumerate() {
+            // Ignore scanner rule definitions to avoid AVS flagging its own patterns.
+            if path.file_name().and_then(|x| x.to_str()) == Some("main.rs") && line.contains("(\"AVS-") { continue; }
             for (rule,re) in rules.iter().zip(compiled.iter()) {
                 if rule.0.starts_with("AVS-NIX") && !nix {continue;}
+                if rule.0.starts_with("AVS-QUAL") && !["rs","sh","bash","nix","py","c","cpp","h","cs","go","js","ts"].contains(&path.extension().and_then(|x|x.to_str()).unwrap_or("")) {continue;}
                 if re.is_match(line) {
                     report.findings.push(finding(rule.0,rule.1,rule.2,path,i+1,rule.4,rule.5));
                 }
@@ -154,7 +157,37 @@ fn sarif(report:&Report)->serde_json::Value {
 fn main()->ExitCode {
     let cli=Cli::parse();
     match cli.command {
-        None => { println!("{LOGO}\n  AVS  |  Abora Vulnerability Scanner\n  v{}  •  Read-only security & quality analysis\n\n  avs scan ~/Work/Abora-OS --cve\n  avs scan ~/Work/Abora-OS --format sarif\n  avs --help",env!("CARGO_PKG_VERSION"));ExitCode::SUCCESS },
+        None => {
+            println!("{LOGO}\n  AVS  |  Abora Vulnerability Scanner\n  v{}  •  Read-only security & quality analysis\n",env!("CARGO_PKG_VERSION"));
+            print!("  Project folder [.] : ");
+            if io::stdout().flush().is_err() { return ExitCode::from(2); }
+            let mut input=String::new();
+            if io::stdin().read_line(&mut input).is_err() {return ExitCode::from(2);}
+            let chosen=input.trim();
+            let path=if chosen.is_empty(){PathBuf::from(".")}else{
+                let expanded=if chosen=="~" {std::env::var("HOME").unwrap_or_else(|_|chosen.to_string())}
+                else if let Some(rest)=chosen.strip_prefix("~/") {format!("{}/{}",std::env::var("HOME").unwrap_or_else(|_|"~".into()),rest)}
+                else {chosen.to_string()};
+                PathBuf::from(expanded)
+            };
+            if !path.exists(){eprintln!("Target not found: {}",path.display());return ExitCode::from(2);}
+            print!("  Check crates.io CVEs using OSV? [y/N] : ");
+            if io::stdout().flush().is_err(){return ExitCode::from(2);}
+            let mut answer=String::new();
+            if io::stdin().read_line(&mut answer).is_err(){return ExitCode::from(2);}
+            let report=scan(&path,false,matches!(answer.trim().to_lowercase().as_str(),"y"|"yes"));
+            println!("\n  Scanned {} files • {} findings • {} warnings",report.files_scanned,report.findings.len(),report.warnings.len());
+            for f in &report.findings {println!("  {} [{}] {}:{} — {}",f.code,f.severity,f.file,f.line,f.message);}
+            for w in &report.warnings {eprintln!("  Warning: {w}");}
+            match serde_json::to_string_pretty(&report) {
+                Ok(json)=>match fs::write("avs-report.json",json){
+                    Ok(())=>println!("\n  Report saved: avs-report.json"),
+                    Err(e)=>{eprintln!("Cannot save report: {e}");return ExitCode::from(2);}
+                },
+                Err(e)=>{eprintln!("Cannot serialize report: {e}");return ExitCode::from(2);}
+            }
+            ExitCode::SUCCESS
+        },
         Some(Command::Scan{path,format,output,cve,hidden})=>{
             if !path.exists(){eprintln!("Target not found: {}",path.display());return ExitCode::from(2);}
             let report=scan(&path,hidden,cve);
