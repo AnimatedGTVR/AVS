@@ -1,6 +1,6 @@
 [package]
 name = "avs"
-version = "0.2.0-alpha"
+version = "0.3.0-alpha"
 edition = "2021"
 description = "Abora Vulnerability Scanner"
 license = "GPL-3.0-only"
